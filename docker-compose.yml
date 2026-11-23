@@ -1,0 +1,219 @@
+name: three-microservices
+
+services:
+  order-postgres:
+    image: postgres:15.20-alpine
+    environment:
+      POSTGRES_DB: order_db
+      POSTGRES_USER: ${ORDER_DB_USERNAME:-order_user}
+      POSTGRES_PASSWORD: ${ORDER_DB_PASSWORD:?Set ORDER_DB_PASSWORD in the Compose env file}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - order-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - three-microservices-network
+
+  inventory-postgres:
+    image: postgres:15.20-alpine
+    environment:
+      POSTGRES_DB: inventory_db
+      POSTGRES_USER: ${INVENTORY_DB_USERNAME:-inventory_user}
+      POSTGRES_PASSWORD: ${INVENTORY_DB_PASSWORD:?Set INVENTORY_DB_PASSWORD in the Compose env file}
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - inventory-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - three-microservices-network
+
+  notification-postgres:
+    image: postgres:15.20-alpine
+    environment:
+      POSTGRES_DB: notification_db
+      POSTGRES_USER: ${NOTIFICATION_DB_USERNAME:-notification_user}
+      POSTGRES_PASSWORD: ${NOTIFICATION_DB_PASSWORD:?Set NOTIFICATION_DB_PASSWORD in the Compose env file}
+    ports:
+      - "127.0.0.1:5435:5432"
+    volumes:
+      - notification-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - three-microservices-network
+
+  kafka:
+    image: apache/kafka:4.1.2
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_HOST://localhost:9092,PLAINTEXT://kafka:19092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: CONTROLLER://:29093,PLAINTEXT_HOST://:9092,PLAINTEXT://:19092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+    ports:
+      - "127.0.0.1:9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 18
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - three-microservices-network
+
+  inventory-service:
+    image: three-microservices/inventory-service:0.1.0
+    build:
+      context: .
+      dockerfile: inventory-service/Dockerfile
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SERVICE_BIND_ADDRESS: 0.0.0.0
+      INVENTORY_HTTP_PORT: 8082
+      INVENTORY_GRPC_PORT: 9090
+      INVENTORY_DB_URL: jdbc:postgresql://inventory-postgres:5432/inventory_db
+      INVENTORY_DB_USERNAME: ${INVENTORY_DB_USERNAME:-inventory_user}
+      INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD:?Set INVENTORY_DB_PASSWORD in the Compose env file}
+    ports:
+      - "127.0.0.1:8082:8082"
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      inventory-postgres:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --show-error http://localhost:8082/api/products >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - three-microservices-network
+
+  order-service:
+    image: three-microservices/order-service:0.1.0
+    build:
+      context: .
+      dockerfile: order-service/Dockerfile
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SERVICE_BIND_ADDRESS: 0.0.0.0
+      ORDER_HTTP_PORT: 8081
+      ORDER_DB_URL: jdbc:postgresql://order-postgres:5432/order_db
+      ORDER_DB_USERNAME: ${ORDER_DB_USERNAME:-order_user}
+      ORDER_DB_PASSWORD: ${ORDER_DB_PASSWORD:?Set ORDER_DB_PASSWORD in the Compose env file}
+      INVENTORY_GRPC_HOST: inventory-service
+      INVENTORY_GRPC_PORT: 9090
+      INVENTORY_GRPC_DEADLINE: ${INVENTORY_GRPC_DEADLINE:-2s}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the Compose env file}
+      JWT_ACCESS_TOKEN_TTL: ${JWT_ACCESS_TOKEN_TTL:-15m}
+      JWT_REFRESH_TOKEN_TTL: ${JWT_REFRESH_TOKEN_TTL:-7d}
+      LOCAL_ADMIN_ENABLED: ${LOCAL_ADMIN_ENABLED:-false}
+      LOCAL_ADMIN_USERNAME: ${LOCAL_ADMIN_USERNAME:-admin}
+      LOCAL_ADMIN_EMAIL: ${LOCAL_ADMIN_EMAIL:-admin@example.test}
+      LOCAL_ADMIN_PASSWORD: ${LOCAL_ADMIN_PASSWORD:-}
+      OUTBOX_PUBLISHER_DELAY: ${OUTBOX_PUBLISHER_DELAY:-1s}
+      OUTBOX_SEND_TIMEOUT: ${OUTBOX_SEND_TIMEOUT:-5s}
+      OUTBOX_PUBLISHER_ENABLED: "true"
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      order-postgres:
+        condition: service_healthy
+        restart: true
+      inventory-service:
+        condition: service_healthy
+        restart: true
+      kafka:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --show-error --output /dev/null http://localhost:8081/auth/login"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - three-microservices-network
+
+  notification-service:
+    image: three-microservices/notification-service:0.1.0
+    build:
+      context: .
+      dockerfile: notification-service/Dockerfile
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SERVICE_BIND_ADDRESS: 0.0.0.0
+      NOTIFICATION_HTTP_PORT: 8083
+      NOTIFICATION_DB_URL: jdbc:postgresql://notification-postgres:5432/notification_db
+      NOTIFICATION_DB_USERNAME: ${NOTIFICATION_DB_USERNAME:-notification_user}
+      NOTIFICATION_DB_PASSWORD: ${NOTIFICATION_DB_PASSWORD:?Set NOTIFICATION_DB_PASSWORD in the Compose env file}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      NOTIFICATION_KAFKA_GROUP_ID: notification-service
+      NOTIFICATION_KAFKA_LISTENER_ENABLED: "true"
+    ports:
+      - "127.0.0.1:8083:8083"
+    depends_on:
+      notification-postgres:
+        condition: service_healthy
+        restart: true
+      kafka:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --show-error http://localhost:8083/api/orders/all >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - three-microservices-network
+
+volumes:
+  order-postgres-data:
+  inventory-postgres-data:
+  notification-postgres-data:
+  kafka-data:
+
+networks:
+  three-microservices-network:
+    driver: bridge
+
